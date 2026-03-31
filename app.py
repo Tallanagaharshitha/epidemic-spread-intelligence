@@ -180,7 +180,7 @@ with st.sidebar:
     prediction_days = st.slider("Prediction Horizon (Days)", 7, 90, 30, key="pred_days")
     model_type = st.selectbox(
         "Epidemic Model",
-        ["SIR Model", "SEIR Model", "Prophet", "ARIMA"],
+        ["SIR Model", "SEIR Model", "ARIMA"],
         key="model_type"
     )
     
@@ -382,8 +382,6 @@ if run_analysis and st.session_state.data_loaded and st.session_state.data is no
                     pred = models.sir_model(region_data, days=prediction_days)
                 elif model_type == "SEIR Model":
                     pred = models.seir_model(region_data, days=prediction_days)
-                elif model_type == "Prophet":
-                    pred = models.prophet_forecast(region_data, days=prediction_days)
                 else:
                     pred = models.arima_forecast(region_data, days=prediction_days)
                 
