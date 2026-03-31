@@ -1,16 +1,15 @@
 import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
-from scipy.optimize import curve_fit
 from sklearn.metrics import mean_squared_error
 import streamlit as st
 from statsmodels.tsa.arima.model import ARIMA
-from prophet import Prophet
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
 warnings.filterwarnings('ignore')
 
 class EpidemicModels:
-    """Epidemic modeling and forecasting"""
+    """Epidemic modeling and forecasting without prophet dependency"""
     
     def __init__(self, data):
         self.data = data
@@ -21,149 +20,121 @@ class EpidemicModels:
         """
         SIR Model: Susceptible-Infectious-Recovered
         """
-        # Extract region-specific data
-        region_data = region_data.sort_values('date')
-        
-        # Initial conditions
-        N = region_data['population'].iloc[0]  # Total population
-        I0 = region_data['confirmed'].iloc[-1]  # Initial infected
-        R0 = region_data['recovered'].iloc[-1] + region_data['deaths'].iloc[-1]  # Initial recovered
-        S0 = N - I0 - R0  # Initial susceptible
-        
-        # Estimate parameters from data
-        recent_growth = region_data['growth_rate'].iloc[-7:].mean() / 100
-        beta = recent_growth + 0.3  # Transmission rate
-        gamma = 0.1  # Recovery rate
-        
-        # Time vector
-        t = np.linspace(0, days, days)
-        
-        # SIR differential equations
-        def deriv(y, t, N, beta, gamma):
-            S, I, R = y
-            dSdt = -beta * S * I / N
-            dIdt = beta * S * I / N - gamma * I
-            dRdt = gamma * I
-            return dSdt, dIdt, dRdt
-        
-        # Initial conditions vector
-        y0 = S0, I0, R0
-        
-        # Integrate ODEs
-        ret = odeint(deriv, y0, t, args=(N, beta, gamma))
-        S, I, R = ret.T
-        
-        # Create prediction dataframe
-        last_date = region_data['date'].max()
-        pred_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days)
-        
-        predictions = pd.DataFrame({
-            'date': pred_dates,
-            'susceptible': S,
-            'infected': I,
-            'recovered': R,
-            'predicted_cases': I + R,
-            'new_cases': np.diff(I, prepend=I[0]),
-            'peak_date': pred_dates[np.argmax(I)],
-            'peak_cases': np.max(I)
-        })
-        
-        return predictions
+        try:
+            # Extract region-specific data
+            region_data = region_data.sort_values('date')
+            
+            # Initial conditions
+            N = region_data['population'].iloc[0] if len(region_data) > 0 else 1000000
+            I0 = region_data['confirmed'].iloc[-1] if len(region_data) > 0 else 100
+            R0 = region_data['recovered'].iloc[-1] + region_data['deaths'].iloc[-1] if len(region_data) > 0 else 0
+            S0 = N - I0 - R0
+            
+            # Estimate parameters from data
+            recent_growth = region_data['growth_rate'].iloc[-7:].mean() / 100 if len(region_data) >= 7 else 0.05
+            beta = min(max(recent_growth + 0.3, 0.1), 1.0)
+            gamma = 0.1
+            
+            # Time vector
+            t = np.linspace(0, days, days)
+            
+            # SIR differential equations
+            def deriv(y, t, N, beta, gamma):
+                S, I, R = y
+                dSdt = -beta * S * I / N
+                dIdt = beta * S * I / N - gamma * I
+                dRdt = gamma * I
+                return dSdt, dIdt, dRdt
+            
+            # Initial conditions vector
+            y0 = S0, I0, R0
+            
+            # Integrate ODEs
+            ret = odeint(deriv, y0, t, args=(N, beta, gamma))
+            S, I, R = ret.T
+            
+            # Create prediction dataframe
+            last_date = region_data['date'].max()
+            pred_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days)
+            
+            predictions = pd.DataFrame({
+                'date': pred_dates,
+                'susceptible': S,
+                'infected': I,
+                'recovered': R,
+                'predicted_cases': I + R,
+                'new_cases': np.diff(I, prepend=I[0]),
+                'peak_date': pred_dates[np.argmax(I)] if len(I) > 0 else pred_dates[0],
+                'peak_cases': np.max(I) if len(I) > 0 else 0
+            })
+            
+            return predictions
+        except Exception as e:
+            st.warning(f"SIR model error: {str(e)}. Using fallback.")
+            return self._fallback_forecast(region_data, days)
     
     def seir_model(self, region_data, days=30):
         """
         SEIR Model: Susceptible-Exposed-Infectious-Recovered
         """
-        region_data = region_data.sort_values('date')
-        
-        N = region_data['population'].iloc[0]
-        E0 = region_data['new_cases'].iloc[-7:].mean() * 5  # Estimate exposed
-        I0 = region_data['confirmed'].iloc[-1]
-        R0 = region_data['recovered'].iloc[-1] + region_data['deaths'].iloc[-1]
-        S0 = N - E0 - I0 - R0
-        
-        # Parameters
-        beta = 0.5  # Transmission rate
-        sigma = 0.2  # Incubation rate (1/latent period)
-        gamma = 0.1  # Recovery rate
-        
-        t = np.linspace(0, days, days)
-        
-        def deriv(y, t, N, beta, sigma, gamma):
-            S, E, I, R = y
-            dSdt = -beta * S * I / N
-            dEdt = beta * S * I / N - sigma * E
-            dIdt = sigma * E - gamma * I
-            dRdt = gamma * I
-            return dSdt, dEdt, dIdt, dRdt
-        
-        y0 = S0, E0, I0, R0
-        ret = odeint(deriv, y0, t, args=(N, beta, sigma, gamma))
-        S, E, I, R = ret.T
-        
-        last_date = region_data['date'].max()
-        pred_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days)
-        
-        predictions = pd.DataFrame({
-            'date': pred_dates,
-            'susceptible': S,
-            'exposed': E,
-            'infected': I,
-            'recovered': R,
-            'predicted_cases': I + R,
-            'new_cases': np.diff(I, prepend=I[0]),
-            'peak_date': pred_dates[np.argmax(I)],
-            'peak_cases': np.max(I)
-        })
-        
-        return predictions
-    
-    def prophet_forecast(self, region_data, days=30):
-        """
-        Facebook Prophet for time series forecasting
-        """
-        # Prepare data for Prophet
-        df_prophet = pd.DataFrame({
-            'ds': region_data['date'],
-            'y': region_data['confirmed']
-        })
-        
-        # Fit Prophet model
-        model = Prophet(
-            yearly_seasonality=False,
-            weekly_seasonality=True,
-            daily_seasonality=False,
-            changepoint_prior_scale=0.05
-        )
-        model.fit(df_prophet)
-        
-        # Make future dataframe
-        future = model.make_future_dataframe(periods=days)
-        
-        # Predict
-        forecast = model.predict(future)
-        
-        # Extract predictions
-        predictions = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(days)
-        predictions.columns = ['date', 'predicted_cases', 'lower_bound', 'upper_bound']
-        
-        # Add additional columns
-        predictions['new_cases'] = predictions['predicted_cases'].diff().fillna(0)
-        predictions['peak_date'] = predictions.loc[predictions['predicted_cases'].idxmax(), 'date']
-        predictions['peak_cases'] = predictions['predicted_cases'].max()
-        
-        return predictions
+        try:
+            region_data = region_data.sort_values('date')
+            
+            N = region_data['population'].iloc[0] if len(region_data) > 0 else 1000000
+            E0 = region_data['new_cases'].iloc[-7:].mean() * 5 if len(region_data) >= 7 else 100
+            I0 = region_data['confirmed'].iloc[-1] if len(region_data) > 0 else 100
+            R0 = region_data['recovered'].iloc[-1] + region_data['deaths'].iloc[-1] if len(region_data) > 0 else 0
+            S0 = N - E0 - I0 - R0
+            
+            # Parameters
+            beta = 0.5
+            sigma = 0.2
+            gamma = 0.1
+            
+            t = np.linspace(0, days, days)
+            
+            def deriv(y, t, N, beta, sigma, gamma):
+                S, E, I, R = y
+                dSdt = -beta * S * I / N
+                dEdt = beta * S * I / N - sigma * E
+                dIdt = sigma * E - gamma * I
+                dRdt = gamma * I
+                return dSdt, dEdt, dIdt, dRdt
+            
+            y0 = S0, E0, I0, R0
+            ret = odeint(deriv, y0, t, args=(N, beta, sigma, gamma))
+            S, E, I, R = ret.T
+            
+            last_date = region_data['date'].max()
+            pred_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days)
+            
+            predictions = pd.DataFrame({
+                'date': pred_dates,
+                'susceptible': S,
+                'exposed': E,
+                'infected': I,
+                'recovered': R,
+                'predicted_cases': I + R,
+                'new_cases': np.diff(I, prepend=I[0]),
+                'peak_date': pred_dates[np.argmax(I)] if len(I) > 0 else pred_dates[0],
+                'peak_cases': np.max(I) if len(I) > 0 else 0
+            })
+            
+            return predictions
+        except Exception as e:
+            st.warning(f"SEIR model error: {str(e)}. Using fallback.")
+            return self._fallback_forecast(region_data, days)
     
     def arima_forecast(self, region_data, days=30):
         """
         ARIMA model for time series forecasting
         """
-        # Prepare time series
-        ts = region_data.set_index('date')['confirmed']
-        
-        # Fit ARIMA model
         try:
-            model = ARIMA(ts, order=(5,1,0))
+            # Prepare time series
+            ts = region_data.set_index('date')['confirmed']
+            
+            # Fit ARIMA model
+            model = ARIMA(ts, order=(3, 1, 2))
             model_fit = model.fit()
             
             # Make predictions
@@ -176,47 +147,105 @@ class EpidemicModels:
             # Create prediction dataframe
             predictions = pd.DataFrame({
                 'date': pred_series.index,
-                'predicted_cases': pred_series.values,
-                'new_cases': pred_series.diff().fillna(0).values
+                'predicted_cases': np.maximum(pred_series.values, 0),
+                'new_cases': np.maximum(pred_series.diff().fillna(0).values, 0)
             })
             
-            predictions['peak_date'] = predictions.loc[predictions['predicted_cases'].idxmax(), 'date']
-            predictions['peak_cases'] = predictions['predicted_cases'].max()
+            predictions['peak_date'] = predictions.loc[predictions['predicted_cases'].idxmax(), 'date'] if len(predictions) > 0 else predictions['date'].iloc[-1]
+            predictions['peak_cases'] = predictions['predicted_cases'].max() if len(predictions) > 0 else 0
+            
+            return predictions
             
         except Exception as e:
-            st.warning(f"ARIMA model failed, using simple exponential smoothing: {str(e)}")
-            # Fallback to simple exponential smoothing
-            alpha = 0.3
-            last_value = ts.iloc[-1]
-            predictions = []
-            dates = pd.date_range(start=ts.index[-1] + pd.Timedelta(days=1), periods=days)
+            st.warning(f"ARIMA model failed: {str(e)}. Using exponential smoothing.")
+            return self._exponential_smoothing_forecast(region_data, days)
+    
+    def _exponential_smoothing_forecast(self, region_data, days=30):
+        """Fallback using exponential smoothing"""
+        try:
+            ts = region_data.set_index('date')['confirmed']
             
-            for i, date in enumerate(dates):
-                if i == 0:
-                    pred = last_value
-                else:
-                    pred = predictions[-1]['predicted_cases'] * (1 + np.random.normal(0, 0.02))
-                
-                predictions.append({
-                    'date': date,
-                    'predicted_cases': pred,
-                    'new_cases': pred - (predictions[-1]['predicted_cases'] if i > 0 else last_value)
-                })
+            # Use simple exponential smoothing
+            model = ExponentialSmoothing(ts, trend='add', seasonal=None)
+            model_fit = model.fit()
             
-            predictions = pd.DataFrame(predictions)
-            predictions['peak_date'] = predictions.loc[predictions['predicted_cases'].idxmax(), 'date']
-            predictions['peak_cases'] = predictions['predicted_cases'].max()
+            forecast = model_fit.forecast(steps=days)
+            
+            pred_dates = pd.date_range(start=ts.index[-1] + pd.Timedelta(days=1), periods=days)
+            
+            predictions = pd.DataFrame({
+                'date': pred_dates,
+                'predicted_cases': np.maximum(forecast.values, 0),
+                'new_cases': np.maximum(np.diff(np.concatenate([[ts.iloc[-1]], forecast.values])), 0)
+            })
+            
+            predictions['peak_date'] = predictions.loc[predictions['predicted_cases'].idxmax(), 'date'] if len(predictions) > 0 else predictions['date'].iloc[-1]
+            predictions['peak_cases'] = predictions['predicted_cases'].max() if len(predictions) > 0 else 0
+            
+            return predictions
+        except Exception as e:
+            return self._simple_growth_forecast(region_data, days)
+    
+    def _simple_growth_forecast(self, region_data, days=30):
+        """Ultimate fallback using simple growth model"""
+        last_value = region_data['confirmed'].iloc[-1] if len(region_data) > 0 else 100
+        growth_rate = region_data['growth_rate'].iloc[-7:].mean() / 100 if len(region_data) >= 7 else 0.03
         
-        return predictions
+        predictions = []
+        pred_dates = pd.date_range(start=region_data['date'].max() + pd.Timedelta(days=1), periods=days)
+        
+        current = last_value
+        for i, date in enumerate(pred_dates):
+            current = current * (1 + growth_rate * (1 - i/days * 0.5))
+            predictions.append({
+                'date': date,
+                'predicted_cases': current,
+                'new_cases': current * growth_rate
+            })
+        
+        predictions_df = pd.DataFrame(predictions)
+        predictions_df['peak_date'] = predictions_df.loc[predictions_df['predicted_cases'].idxmax(), 'date']
+        predictions_df['peak_cases'] = predictions_df['predicted_cases'].max()
+        
+        return predictions_df
+    
+    def _fallback_forecast(self, region_data, days=30):
+        """Simple linear fallback forecast"""
+        last_date = region_data['date'].max()
+        last_value = region_data['confirmed'].iloc[-1] if len(region_data) > 0 else 100
+        
+        pred_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=days)
+        
+        # Simple linear growth then decay
+        predictions = []
+        for i, date in enumerate(pred_dates):
+            if i < days * 0.6:
+                growth = 1 + (i / (days * 0.6)) * 0.3
+            else:
+                growth = 1.3 - ((i - days * 0.6) / (days * 0.4)) * 0.5
+            predicted = last_value * growth
+            predictions.append({
+                'date': date,
+                'predicted_cases': max(0, predicted),
+                'new_cases': max(0, predicted * 0.05)
+            })
+        
+        predictions_df = pd.DataFrame(predictions)
+        predictions_df['peak_date'] = predictions_df.loc[predictions_df['predicted_cases'].idxmax(), 'date']
+        predictions_df['peak_cases'] = predictions_df['predicted_cases'].max()
+        
+        return predictions_df
     
     def calculate_r0(self, region_data):
         """Calculate reproduction number"""
-        # Simple R0 calculation using growth rate and serial interval
-        serial_interval = 5  # Average days between cases
-        growth_rate = region_data['growth_rate'].iloc[-7:].mean() / 100
-        r0 = 1 + growth_rate * serial_interval
-        
-        return max(0, r0)
+        try:
+            # Simple R0 calculation using growth rate and serial interval
+            serial_interval = 5
+            growth_rate = region_data['growth_rate'].iloc[-7:].mean() / 100 if len(region_data) >= 7 else 0
+            r0 = 1 + growth_rate * serial_interval
+            return max(0.5, min(3.0, r0))
+        except:
+            return 1.2
     
     def calculate_herd_immunity_threshold(self, r0):
         """Calculate herd immunity threshold"""
@@ -226,23 +255,20 @@ class EpidemicModels:
     
     def estimate_peak(self, region_data):
         """Estimate peak of epidemic"""
-        # Fit a quadratic to recent data
-        recent_cases = region_data['confirmed'].tail(14).values
-        x = np.arange(len(recent_cases))
-        
         try:
-            # Fit quadratic
+            recent_cases = region_data['confirmed'].tail(14).values
+            x = np.arange(len(recent_cases))
+            
             coeffs = np.polyfit(x, recent_cases, 2)
             
-            # Find vertex
-            if coeffs[0] < 0:  # Concave down (peak)
+            if coeffs[0] < 0:
                 peak_x = -coeffs[1] / (2 * coeffs[0])
                 peak_y = np.polyval(coeffs, peak_x)
                 
                 if 0 <= peak_x <= len(recent_cases) * 2:
                     days_to_peak = peak_x - (len(recent_cases) - 1)
                     return days_to_peak, peak_y
+            
+            return None, None
         except:
-            pass
-        
-        return None, None
+            return None, None
